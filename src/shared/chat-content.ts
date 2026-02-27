@@ -5,14 +5,22 @@ function isTextBlockType(type: unknown): boolean {
 
 /**
  * Try to parse a string as a JSON-encoded content block array and extract text.
+ * Recursively unwraps nested stringified content blocks (up to {@link MAX_UNWRAP_DEPTH}
+ * layers) so that doubly- or triply-serialized payloads are fully resolved.
  * Returns the extracted text chunks, or null if the string is not a valid
  * content block array. This prevents serialized content arrays from leaking
  * through as raw JSON text (see openclaw/openclaw#29028).
  */
+const MAX_UNWRAP_DEPTH = 5;
+
 function tryParseStringifiedContentBlocks(
   raw: string,
   sanitizeText?: (text: string) => string,
+  depth: number = 0,
 ): string[] | null {
+  if (depth > MAX_UNWRAP_DEPTH) {
+    return null;
+  }
   const trimmed = raw.trim();
   if (!trimmed.startsWith("[")) {
     return null;
@@ -37,9 +45,16 @@ function tryParseStringifiedContentBlocks(
     if (isTextBlockType((item as { type?: unknown }).type)) {
       const text = (item as { text?: unknown }).text;
       if (typeof text === "string") {
-        const value = sanitizeText ? sanitizeText(text) : text;
-        if (value.trim()) {
-          chunks.push(value);
+        // Recursively unwrap if the extracted text is itself a stringified
+        // content block array (happens after repeated serialization cycles).
+        const nested = tryParseStringifiedContentBlocks(text, sanitizeText, depth + 1);
+        if (nested !== null && nested.length > 0) {
+          chunks.push(...nested);
+        } else {
+          const value = sanitizeText ? sanitizeText(text) : text;
+          if (value.trim()) {
+            chunks.push(value);
+          }
         }
       }
     }
@@ -91,9 +106,16 @@ export function extractTextFromChatContent(
     if (typeof text !== "string") {
       continue;
     }
-    const value = opts?.sanitizeText ? opts.sanitizeText(text) : text;
-    if (value.trim()) {
-      chunks.push(value);
+    // Recursively unwrap if the text value is itself a stringified content
+    // block array (happens after repeated serialization cycles).
+    const nested = tryParseStringifiedContentBlocks(text, opts?.sanitizeText);
+    if (nested !== null && nested.length > 0) {
+      chunks.push(...nested);
+    } else {
+      const value = opts?.sanitizeText ? opts.sanitizeText(text) : text;
+      if (value.trim()) {
+        chunks.push(value);
+      }
     }
   }
 

@@ -129,6 +129,45 @@ describe("extractTextFromChatContent", () => {
     // which the function should detect and parse.
     expect(extractTextFromChatContent(inner)).toBe("actual content");
   });
+
+  it("recursively unwraps nested stringified content blocks", () => {
+    // Simulate what happens after one recursive serialization cycle:
+    // the text field itself contains a stringified content block array.
+    const innerPayload = JSON.stringify([{ type: "output_text", text: "ok" }]);
+    const outerPayload = [{ type: "output_text", text: innerPayload }];
+    expect(extractTextFromChatContent(outerPayload)).toBe("ok");
+  });
+
+  it("recursively unwraps stringified-within-stringified content", () => {
+    // String input where the outer string is a serialized array whose text
+    // field is itself another serialized array.
+    const innerPayload = JSON.stringify([{ type: "text", text: "deep value" }]);
+    const outerPayload = JSON.stringify([{ type: "output_text", text: innerPayload }]);
+    expect(extractTextFromChatContent(outerPayload)).toBe("deep value");
+  });
+
+  it("recursively unwraps three layers of nesting", () => {
+    const l1 = JSON.stringify([{ type: "text", text: "leaf" }]);
+    const l2 = JSON.stringify([{ type: "output_text", text: l1 }]);
+    const l3 = JSON.stringify([{ type: "text", text: l2 }]);
+    expect(extractTextFromChatContent(l3)).toBe("leaf");
+  });
+
+  it("caps recursion depth and returns the stringified inner layer", () => {
+    // Build 7 layers of nesting (exceeds MAX_UNWRAP_DEPTH of 5).
+    let payload = "bottom";
+    for (let i = 0; i < 7; i++) {
+      payload = JSON.stringify([{ type: "text", text: payload }]);
+    }
+    // Should still extract something without throwing, but won't fully unwrap
+    // all the way to "bottom" because depth is capped.
+    const result = extractTextFromChatContent(payload);
+    expect(result).not.toBe(null);
+    expect(typeof result).toBe("string");
+    // Should not contain "bottom" since we can't unwrap deep enough
+    // (6 parse layers needed but only 5 allowed inside the recursion).
+    expect(result).not.toBe("bottom");
+  });
 });
 
 describe("shared/frontmatter", () => {
