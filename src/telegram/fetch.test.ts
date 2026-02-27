@@ -259,15 +259,22 @@ describe("createIPv4PreferredLookup", () => {
     resolve4.mockRestore();
   });
 
-  it("returns all IPv4 addresses when all: true", async () => {
+  it("returns IPv4-first with IPv6 candidates preserved when all: true", async () => {
     const dnsModule = await import("node:dns");
     const resolve4 = vi.spyOn(dnsModule, "resolve4");
+    const resolve6 = vi.spyOn(dnsModule, "resolve6");
     resolve4.mockImplementation(((
       _hostname: string,
       callback: (err: NodeJS.ErrnoException | null, addresses: string[]) => void,
     ) => {
       callback(null, ["1.2.3.4", "5.6.7.8"]);
     }) as typeof dnsModule.resolve4);
+    resolve6.mockImplementation(((
+      _hostname: string,
+      callback: (err: NodeJS.ErrnoException | null, addresses: string[]) => void,
+    ) => {
+      callback(null, ["::1", "::2"]);
+    }) as typeof dnsModule.resolve6);
 
     const lookup = createIPv4PreferredLookup();
     const result = await new Promise<Array<{ address: string; family: number }>>(
@@ -289,8 +296,90 @@ describe("createIPv4PreferredLookup", () => {
     expect(result).toEqual([
       { address: "1.2.3.4", family: 4 },
       { address: "5.6.7.8", family: 4 },
+      { address: "::1", family: 6 },
+      { address: "::2", family: 6 },
     ]);
     resolve4.mockRestore();
+    resolve6.mockRestore();
+  });
+
+  it("returns only IPv6 when all: true and resolve4 fails (IPv6-only network)", async () => {
+    const dnsModule = await import("node:dns");
+    const resolve4 = vi.spyOn(dnsModule, "resolve4");
+    const resolve6 = vi.spyOn(dnsModule, "resolve6");
+    resolve4.mockImplementation(((
+      _hostname: string,
+      callback: (err: NodeJS.ErrnoException | null, addresses: string[]) => void,
+    ) => {
+      callback(new Error("ENODATA") as NodeJS.ErrnoException, []);
+    }) as typeof dnsModule.resolve4);
+    resolve6.mockImplementation(((
+      _hostname: string,
+      callback: (err: NodeJS.ErrnoException | null, addresses: string[]) => void,
+    ) => {
+      callback(null, ["2001:db8::1"]);
+    }) as typeof dnsModule.resolve6);
+
+    const lookup = createIPv4PreferredLookup();
+    const result = await new Promise<Array<{ address: string; family: number }>>(
+      (resolve, reject) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (lookup as any)(
+          "ipv6only.example.com",
+          { all: true },
+          (err: Error | null, addresses: Array<{ address: string; family: number }>) => {
+            if (err) {
+              return reject(err);
+            }
+            resolve(addresses);
+          },
+        );
+      },
+    );
+
+    expect(result).toEqual([{ address: "2001:db8::1", family: 6 }]);
+    resolve4.mockRestore();
+    resolve6.mockRestore();
+  });
+
+  it("falls back to dns.lookup when both resolve4 and resolve6 fail with all: true", async () => {
+    const dnsModule = await import("node:dns");
+    const resolve4 = vi.spyOn(dnsModule, "resolve4");
+    const resolve6 = vi.spyOn(dnsModule, "resolve6");
+    const lookupSpy = vi.spyOn(dnsModule, "lookup");
+
+    resolve4.mockImplementation(((
+      _hostname: string,
+      callback: (err: NodeJS.ErrnoException | null, addresses: string[]) => void,
+    ) => {
+      callback(new Error("ENODATA") as NodeJS.ErrnoException, []);
+    }) as typeof dnsModule.resolve4);
+    resolve6.mockImplementation(((
+      _hostname: string,
+      callback: (err: NodeJS.ErrnoException | null, addresses: string[]) => void,
+    ) => {
+      callback(new Error("ENODATA") as NodeJS.ErrnoException, []);
+    }) as typeof dnsModule.resolve6);
+    lookupSpy.mockImplementation(((
+      _hostname: string,
+      _options: unknown,
+      callback: (err: NodeJS.ErrnoException | null, address: string, family: number) => void,
+    ) => {
+      callback(null, "10.0.0.1", 4);
+    }) as typeof dnsModule.lookup);
+
+    const lookup = createIPv4PreferredLookup();
+    await new Promise<void>((resolve) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (lookup as any)("raw-ip.local", { all: true }, () => {
+        resolve();
+      });
+    });
+
+    expect(lookupSpy).toHaveBeenCalled();
+    resolve4.mockRestore();
+    resolve6.mockRestore();
+    lookupSpy.mockRestore();
   });
 
   it("falls back to dns.lookup when dns.resolve4 fails", async () => {

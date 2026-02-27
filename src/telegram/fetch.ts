@@ -42,16 +42,59 @@ export function createIPv4PreferredLookup(): net.LookupFunction {
       family?: number,
     ) => void,
   ): void => {
+    if (options.all) {
+      // When autoSelectFamily requests all addresses, resolve both A and
+      // AAAA records via c-ares so the caller can try IPv4 first while
+      // still falling back to IPv6 on IPv6-only / DNS64/NAT64 networks.
+      let v4Done = false;
+      let v6Done = false;
+      let v4Addrs: string[] = [];
+      let v6Addrs: string[] = [];
+      const finish = () => {
+        if (!v4Done || !v6Done) {
+          return;
+        }
+        const combined: dns.LookupAddress[] = [
+          ...v4Addrs.map((addr) => ({ address: addr, family: 4 as const })),
+          ...v6Addrs.map((addr) => ({ address: addr, family: 6 as const })),
+        ];
+        if (combined.length > 0) {
+          callback(null, combined);
+          return;
+        }
+        // Both c-ares queries failed; fall back to standard dns.lookup
+        // so raw IP addresses and exotic resolver configs still work.
+        dns.lookup(
+          hostname,
+          options,
+          callback as (
+            err: NodeJS.ErrnoException | null,
+            address: string | dns.LookupAddress[],
+            family: number,
+          ) => void,
+        );
+      };
+      dns.resolve4(hostname, (err, addrs) => {
+        if (!err && addrs?.length) {
+          v4Addrs = addrs;
+        }
+        v4Done = true;
+        finish();
+      });
+      dns.resolve6(hostname, (err, addrs) => {
+        if (!err && addrs?.length) {
+          v6Addrs = addrs;
+        }
+        v6Done = true;
+        finish();
+      });
+      return;
+    }
+
+    // Single-result path: prefer IPv4 via c-ares, fall back to dns.lookup.
     dns.resolve4(hostname, (resolveErr, addresses) => {
       if (!resolveErr && addresses?.length) {
-        if (options.all) {
-          callback(
-            null,
-            addresses.map((addr) => ({ address: addr, family: 4 })),
-          );
-        } else {
-          callback(null, addresses[0], 4);
-        }
+        callback(null, addresses[0], 4);
         return;
       }
       // Fallback to standard dns.lookup with original options so
