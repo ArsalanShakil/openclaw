@@ -342,6 +342,48 @@ describe("createIPv4PreferredLookup", () => {
     resolve6.mockRestore();
   });
 
+  it("does not block on slow AAAA when IPv4 resolves first (grace timer)", async () => {
+    vi.useFakeTimers();
+    const dnsModule = await import("node:dns");
+    const resolve4 = vi.spyOn(dnsModule, "resolve4");
+    const resolve6 = vi.spyOn(dnsModule, "resolve6");
+
+    // resolve4 returns immediately
+    resolve4.mockImplementation(((
+      _hostname: string,
+      callback: (err: NodeJS.ErrnoException | null, addresses: string[]) => void,
+    ) => {
+      callback(null, ["1.2.3.4"]);
+    }) as typeof dnsModule.resolve4);
+
+    // resolve6 never calls back (simulates dropped AAAA query)
+    resolve6.mockImplementation((() => {}) as unknown as typeof dnsModule.resolve6);
+
+    const lookup = createIPv4PreferredLookup();
+    let result: Array<{ address: string; family: number }> | undefined;
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (lookup as any)(
+      "api.telegram.org",
+      { all: true },
+      (_err: Error | null, addresses: Array<{ address: string; family: number }>) => {
+        result = addresses;
+      },
+    );
+
+    // Before grace timer fires, result should not be set
+    expect(result).toBeUndefined();
+
+    // Advance past the 50ms grace timer
+    await vi.advanceTimersByTimeAsync(60);
+
+    expect(result).toEqual([{ address: "1.2.3.4", family: 4 }]);
+
+    resolve4.mockRestore();
+    resolve6.mockRestore();
+    vi.useRealTimers();
+  });
+
   it("falls back to dns.lookup when both resolve4 and resolve6 fail with all: true", async () => {
     const dnsModule = await import("node:dns");
     const resolve4 = vi.spyOn(dnsModule, "resolve4");

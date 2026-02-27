@@ -43,16 +43,30 @@ export function createIPv4PreferredLookup(): net.LookupFunction {
     ) => void,
   ): void => {
     if (options.all) {
-      // When autoSelectFamily requests all addresses, resolve both A and
-      // AAAA records via c-ares so the caller can try IPv4 first while
-      // still falling back to IPv6 on IPv6-only / DNS64/NAT64 networks.
-      let v4Done = false;
-      let v6Done = false;
+      // Resolve both A and AAAA records via c-ares so autoSelectFamily
+      // can try IPv4 first while still falling back to IPv6 on
+      // IPv6-only / DNS64/NAT64 networks.
+      //
+      // To avoid blocking on slow/dropped AAAA queries (the original
+      // bug scenario), we use a grace timer: once the first query
+      // returns results, we give the other query a short window (50ms)
+      // to complete. If it doesn't finish in time, we return what we
+      // have so undici can start connecting immediately.
+      const GRACE_MS = 50;
+      let returned = false;
       let v4Addrs: string[] = [];
       let v6Addrs: string[] = [];
-      const finish = () => {
-        if (!v4Done || !v6Done) {
+      let v4Done = false;
+      let v6Done = false;
+      let graceTimer: ReturnType<typeof setTimeout> | null = null;
+
+      const emit = () => {
+        if (returned) {
           return;
+        }
+        returned = true;
+        if (graceTimer) {
+          clearTimeout(graceTimer);
         }
         const combined: dns.LookupAddress[] = [
           ...v4Addrs.map((addr) => ({ address: addr, family: 4 as const })),
@@ -74,19 +88,40 @@ export function createIPv4PreferredLookup(): net.LookupFunction {
           ) => void,
         );
       };
+
+      const onQueryDone = () => {
+        if (returned) {
+          return;
+        }
+        if (v4Done && v6Done) {
+          // Both finished — emit whatever we collected.
+          emit();
+        } else if (v4Addrs.length > 0 || v6Addrs.length > 0) {
+          // One query returned results; give the other a brief window
+          // so autoSelectFamily has candidates from both families, but
+          // don't stall when AAAA queries are dropped or very slow.
+          if (!graceTimer) {
+            graceTimer = setTimeout(emit, GRACE_MS);
+            graceTimer.unref();
+          }
+        }
+        // If the completed query failed and the other isn't done yet,
+        // just wait — we have no results to return early.
+      };
+
       dns.resolve4(hostname, (err, addrs) => {
         if (!err && addrs?.length) {
           v4Addrs = addrs;
         }
         v4Done = true;
-        finish();
+        onQueryDone();
       });
       dns.resolve6(hostname, (err, addrs) => {
         if (!err && addrs?.length) {
           v6Addrs = addrs;
         }
         v6Done = true;
-        finish();
+        onQueryDone();
       });
       return;
     }
