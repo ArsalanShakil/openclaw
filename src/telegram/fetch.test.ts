@@ -384,6 +384,64 @@ describe("createIPv4PreferredLookup", () => {
     vi.useRealTimers();
   });
 
+  it("waits for resolve4 when resolve6 returns first (does not emit IPv6-only)", async () => {
+    vi.useFakeTimers();
+    const dnsModule = await import("node:dns");
+    const resolve4 = vi.spyOn(dnsModule, "resolve4");
+    const resolve6 = vi.spyOn(dnsModule, "resolve6");
+
+    // resolve6 returns immediately with IPv6 addresses
+    resolve6.mockImplementation(((
+      _hostname: string,
+      callback: (err: NodeJS.ErrnoException | null, addresses: string[]) => void,
+    ) => {
+      callback(null, ["2001:db8::1"]);
+    }) as typeof dnsModule.resolve6);
+
+    // resolve4 is slow — returns after 100ms (beyond the 50ms grace window)
+    let resolve4Callback:
+      | ((err: NodeJS.ErrnoException | null, addresses: string[]) => void)
+      | null = null;
+    resolve4.mockImplementation(((
+      _hostname: string,
+      callback: (err: NodeJS.ErrnoException | null, addresses: string[]) => void,
+    ) => {
+      resolve4Callback = callback;
+    }) as typeof dnsModule.resolve4);
+
+    const lookup = createIPv4PreferredLookup();
+    let result: Array<{ address: string; family: number }> | undefined;
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (lookup as any)(
+      "api.telegram.org",
+      { all: true },
+      (_err: Error | null, addresses: Array<{ address: string; family: number }>) => {
+        result = addresses;
+      },
+    );
+
+    // resolve6 returned immediately but resolve4 hasn't yet — no grace timer should fire
+    // because the timer only starts when IPv4 resolves first.
+    expect(result).toBeUndefined();
+
+    // Advance well past the 50ms grace window — still should not emit
+    await vi.advanceTimersByTimeAsync(100);
+    expect(result).toBeUndefined();
+
+    // Now resolve4 returns — both queries done, should emit with IPv4 + IPv6
+    resolve4Callback!(null, ["1.2.3.4"]);
+
+    expect(result).toEqual([
+      { address: "1.2.3.4", family: 4 },
+      { address: "2001:db8::1", family: 6 },
+    ]);
+
+    resolve4.mockRestore();
+    resolve6.mockRestore();
+    vi.useRealTimers();
+  });
+
   it("falls back to dns.lookup when both resolve4 and resolve6 fail with all: true", async () => {
     const dnsModule = await import("node:dns");
     const resolve4 = vi.spyOn(dnsModule, "resolve4");
