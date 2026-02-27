@@ -132,24 +132,107 @@ export function createIPv4PreferredLookup(): net.LookupFunction {
       return;
     }
 
-    // Single-result path: prefer IPv4 via c-ares, fall back to dns.lookup.
-    dns.resolve4(hostname, (resolveErr, addresses) => {
-      if (!resolveErr && addresses?.length) {
-        callback(null, addresses[0], 4);
-        return;
-      }
-      // Fallback to standard dns.lookup with original options so
-      // IPv6-only networks and raw IP addresses still work.
-      dns.lookup(
-        hostname,
-        options,
-        callback as (
-          err: NodeJS.ErrnoException | null,
-          address: string | dns.LookupAddress[],
-          family: number,
-        ) => void,
-      );
-    });
+    // Single-result path: run OS resolver (dns.lookup) and c-ares
+    // (dns.resolve4) in parallel. dns.lookup honors /etc/hosts and
+    // split-horizon DNS rules; dns.resolve4 bypasses them but works
+    // around systems where getaddrinfo hangs or returns unreachable
+    // IPv6 (the original bug). Prefer the OS result when it returns
+    // IPv4, so host-file overrides and local DNS pinning still work.
+    {
+      const GRACE_MS = 50;
+      let returned = false;
+      let caresAddr: string | null = null;
+      let osAddr: string | null = null;
+      let caresDone = false;
+      let osDone = false;
+      let graceTimer: ReturnType<typeof setTimeout> | null = null;
+
+      const emit = (address: string, family: number) => {
+        if (returned) {
+          return;
+        }
+        returned = true;
+        if (graceTimer) {
+          clearTimeout(graceTimer);
+        }
+        callback(null, address, family);
+      };
+
+      const onDone = () => {
+        if (returned) {
+          return;
+        }
+
+        // OS resolver returned IPv4 — prefer it (honors /etc/hosts).
+        if (osDone && osAddr) {
+          emit(osAddr, 4);
+          return;
+        }
+
+        if (caresDone && osDone) {
+          // Both finished; OS resolver didn't return IPv4.
+          if (caresAddr) {
+            emit(caresAddr, 4);
+          } else {
+            // Both failed — fall back to dns.lookup with original
+            // options so raw IP addresses and exotic configs work.
+            dns.lookup(
+              hostname,
+              options,
+              callback as (
+                err: NodeJS.ErrnoException | null,
+                address: string | dns.LookupAddress[],
+                family: number,
+              ) => void,
+            );
+          }
+          return;
+        }
+
+        if (caresDone && caresAddr && !osDone) {
+          // c-ares returned IPv4; give OS resolver a brief window —
+          // its answer takes priority because it honors /etc/hosts.
+          if (!graceTimer) {
+            graceTimer = setTimeout(() => {
+              if (returned) {
+                return;
+              }
+              if (osAddr) {
+                emit(osAddr, 4);
+              } else {
+                emit(caresAddr!, 4);
+              }
+            }, GRACE_MS);
+            graceTimer.unref();
+          }
+        }
+        // Otherwise (c-ares failed, OS resolver not done) — wait.
+      };
+
+      dns.resolve4(hostname, (err, addrs) => {
+        if (!err && addrs?.length) {
+          caresAddr = addrs[0];
+        }
+        caresDone = true;
+        onDone();
+      });
+
+      dns.lookup(hostname, { ...options, family: 4 }, ((
+        err: NodeJS.ErrnoException | null,
+        address: string,
+        family: number,
+      ) => {
+        if (!err && address && family === 4) {
+          osAddr = address;
+        }
+        osDone = true;
+        onDone();
+      }) as (
+        err: NodeJS.ErrnoException | null,
+        address: string | dns.LookupAddress[],
+        family: number,
+      ) => void);
+    }
   };
   return lookupImpl as unknown as net.LookupFunction;
 }

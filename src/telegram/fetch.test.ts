@@ -229,15 +229,24 @@ describe("resolveTelegramFetch", () => {
 });
 
 describe("createIPv4PreferredLookup", () => {
-  it("returns IPv4 address from dns.resolve4 for single lookup", async () => {
+  it("returns IPv4 address from dns.resolve4 when OS resolver fails for single lookup", async () => {
     const dnsModule = await import("node:dns");
     const resolve4 = vi.spyOn(dnsModule, "resolve4");
+    const lookupSpy = vi.spyOn(dnsModule, "lookup");
     resolve4.mockImplementation(((
       _hostname: string,
       callback: (err: NodeJS.ErrnoException | null, addresses: string[]) => void,
     ) => {
       callback(null, ["1.2.3.4", "5.6.7.8"]);
     }) as typeof dnsModule.resolve4);
+    // OS resolver fails — c-ares result should be used
+    lookupSpy.mockImplementation(((
+      _hostname: string,
+      _options: unknown,
+      callback: (err: NodeJS.ErrnoException | null, address: string, family: number) => void,
+    ) => {
+      callback(new Error("ENODATA") as NodeJS.ErrnoException, "", 0);
+    }) as typeof dnsModule.lookup);
 
     const lookup = createIPv4PreferredLookup();
     const result = await new Promise<{ address: string; family: number }>((resolve, reject) => {
@@ -257,6 +266,50 @@ describe("createIPv4PreferredLookup", () => {
     expect(result.address).toBe("1.2.3.4");
     expect(result.family).toBe(4);
     resolve4.mockRestore();
+    lookupSpy.mockRestore();
+  });
+
+  it("prefers OS resolver IPv4 over c-ares for single lookup (honors /etc/hosts)", async () => {
+    const dnsModule = await import("node:dns");
+    const resolve4 = vi.spyOn(dnsModule, "resolve4");
+    const lookupSpy = vi.spyOn(dnsModule, "lookup");
+
+    // c-ares returns public DNS answer
+    resolve4.mockImplementation(((
+      _hostname: string,
+      callback: (err: NodeJS.ErrnoException | null, addresses: string[]) => void,
+    ) => {
+      callback(null, ["1.2.3.4"]);
+    }) as typeof dnsModule.resolve4);
+    // OS resolver returns a different IPv4 (e.g. /etc/hosts override)
+    lookupSpy.mockImplementation(((
+      _hostname: string,
+      _options: unknown,
+      callback: (err: NodeJS.ErrnoException | null, address: string, family: number) => void,
+    ) => {
+      callback(null, "10.0.0.1", 4);
+    }) as typeof dnsModule.lookup);
+
+    const lookup = createIPv4PreferredLookup();
+    const result = await new Promise<{ address: string; family: number }>((resolve, reject) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (lookup as any)(
+        "api.telegram.org",
+        { all: false },
+        (err: Error | null, address: string, family: number) => {
+          if (err) {
+            return reject(err);
+          }
+          resolve({ address, family });
+        },
+      );
+    });
+
+    // OS resolver (dns.lookup) should be preferred — it honors /etc/hosts
+    expect(result.address).toBe("10.0.0.1");
+    expect(result.family).toBe(4);
+    resolve4.mockRestore();
+    lookupSpy.mockRestore();
   });
 
   it("returns IPv4-first with IPv6 candidates preserved when all: true", async () => {
