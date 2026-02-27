@@ -96,17 +96,23 @@ export function createIPv4PreferredLookup(): net.LookupFunction {
         if (v4Done && v6Done) {
           // Both finished — emit whatever we collected.
           emit();
-        } else if (v4Addrs.length > 0 || v6Addrs.length > 0) {
-          // One query returned results; give the other a brief window
-          // so autoSelectFamily has candidates from both families, but
-          // don't stall when AAAA queries are dropped or very slow.
+        } else if (v4Done && v4Addrs.length > 0) {
+          // IPv4 resolved; give AAAA a brief window so autoSelectFamily
+          // gets both families, but don't stall when AAAA queries are
+          // dropped or very slow (the original bug scenario).
+          //
+          // We only start the timer on IPv4 success, never on IPv6-only
+          // results. If resolve6 finishes first, we always wait for
+          // resolve4 — this lookup is "IPv4-preferred" and on hosts
+          // where IPv6 is present but unroutable, emitting IPv6 alone
+          // would recreate the exact timeout this fix is meant to avoid.
           if (!graceTimer) {
             graceTimer = setTimeout(emit, GRACE_MS);
             graceTimer.unref();
           }
         }
-        // If the completed query failed and the other isn't done yet,
-        // just wait — we have no results to return early.
+        // Otherwise (one query failed, the other isn't done yet, or
+        // only IPv6 returned so far) — just wait for the remaining query.
       };
 
       dns.resolve4(hostname, (err, addrs) => {
