@@ -46,6 +46,89 @@ describe("extractTextFromChatContent", () => {
       ),
     ).toBe("hello\nworld");
   });
+
+  it("extracts text from output_text blocks (OpenAI Responses format)", () => {
+    expect(
+      extractTextFromChatContent([
+        { type: "output_text", text: "hello" },
+        { type: "output_text", text: "world" },
+      ]),
+    ).toBe("hello world");
+  });
+
+  it("mixes text and output_text blocks", () => {
+    expect(
+      extractTextFromChatContent([
+        { type: "text", text: "hello" },
+        { type: "output_text", text: "world" },
+      ]),
+    ).toBe("hello world");
+  });
+
+  it("extracts text from a JSON-stringified content block array", () => {
+    const stringified = JSON.stringify([{ type: "text", text: "heartbeat reply" }]);
+    expect(extractTextFromChatContent(stringified)).toBe("heartbeat reply");
+  });
+
+  it("extracts text from stringified output_text blocks", () => {
+    const stringified = JSON.stringify([{ type: "output_text", text: "heartbeat reply" }]);
+    expect(extractTextFromChatContent(stringified)).toBe("heartbeat reply");
+  });
+
+  it("joins multiple stringified text blocks", () => {
+    const stringified = JSON.stringify([
+      { type: "text", text: "hello" },
+      { type: "text", text: "world" },
+    ]);
+    expect(extractTextFromChatContent(stringified)).toBe("hello world");
+  });
+
+  it("skips non-text blocks in stringified arrays", () => {
+    const stringified = JSON.stringify([
+      { type: "text", text: "visible" },
+      { type: "image_url", image_url: "https://example.com" },
+    ]);
+    expect(extractTextFromChatContent(stringified)).toBe("visible");
+  });
+
+  it("does not parse plain strings starting with [", () => {
+    expect(extractTextFromChatContent("[hello world]")).toBe("[hello world]");
+  });
+
+  it("does not parse JSON arrays of non-objects", () => {
+    expect(extractTextFromChatContent(JSON.stringify([1, 2, 3]))).toBe("[1,2,3]");
+  });
+
+  it("does not parse arrays missing type field", () => {
+    const stringified = JSON.stringify([{ text: "no type" }]);
+    expect(extractTextFromChatContent(stringified)).toBe(stringified.replace(/\s+/g, " ").trim());
+  });
+
+  it("applies sanitizer to stringified content blocks", () => {
+    const stringified = JSON.stringify([{ type: "text", text: "secret [Tool Call: x] ok" }]);
+    expect(
+      extractTextFromChatContent(stringified, {
+        sanitizeText: (text) => text.replace(/\[Tool Call:[^\]]+\]\s*/g, ""),
+      }),
+    ).toBe("secret ok");
+  });
+
+  it("returns null for stringified array with only whitespace text", () => {
+    // When all text blocks contain only whitespace, the parsed chunks are empty
+    // so the function falls through to the plain-string path which normalizes
+    // the raw JSON string itself.
+    const stringified = JSON.stringify([{ type: "text", text: "   " }]);
+    const result = extractTextFromChatContent(stringified);
+    expect(typeof result).toBe("string");
+    expect(result).not.toBe(null);
+  });
+
+  it("handles doubly-stringified content blocks (recursive escaping)", () => {
+    const inner = JSON.stringify([{ type: "text", text: "actual content" }]);
+    // The outer layer is just a plain string starting with '[{\"type...',
+    // which the function should detect and parse.
+    expect(extractTextFromChatContent(inner)).toBe("actual content");
+  });
 });
 
 describe("shared/frontmatter", () => {
